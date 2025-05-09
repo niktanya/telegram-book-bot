@@ -103,9 +103,11 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
         if book_matches.empty:
             closest_title = find_closest_book_title(book_query, books_df[title_name_in_dataset].tolist())
             if closest_title:
+                logger.info(f"Нашли наиболее похожее название книги, {closest_title}")
                 book_matches = books_df[books_df[title_name_in_dataset] == closest_title]
 
         if book_matches.empty:
+            logger.info("Нет мэтча по датасету для коллаборативной фильтрации")
             return await recommend_books_gpt(book_query, num_recommendations)
 
         book_id = book_matches.iloc[0]['book_id']
@@ -114,6 +116,7 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
         book_vectors = ratings_matrix.T
 
         if book_id not in book_vectors.index:
+            logger.info("У выбранной книги нет оценок пользователей -> не можем получить косинусовое сходтство и использовать коллаборативную фильтрацию")
             return await recommend_books_gpt(book_query, num_recommendations)
 
         target_vector = book_vectors.loc[[book_id]]
