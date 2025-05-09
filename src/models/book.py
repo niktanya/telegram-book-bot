@@ -15,7 +15,7 @@ class Book:
     Класс для представления книги.
     """
     title: str
-    author: str
+    authors: str
     year: Optional[str] = None
     description: Optional[str] = None
     genre: Optional[str] = None
@@ -28,7 +28,7 @@ class Book:
             Строка с информацией о книге
         """
         result = f"*{self.title}*\n"
-        result += f"Автор: {self.author}\n"
+        result += f"Авторы: {self.authors}\n"
         
         if self.year:
             result += f"Год: {self.year}\n"
@@ -50,7 +50,7 @@ class Book:
         """
         return {
             "title": self.title,
-            "author": self.author,
+            "authors": self.authors,
             "year": self.year,
             "description": self.description,
             "genre": self.genre

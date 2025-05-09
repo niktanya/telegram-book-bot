@@ -162,11 +162,11 @@ def run_bot(token: str) -> None:
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("search", search_command),
-            CommandHandler("recommend", recommend_command),
+            CommandHandler("recommend", recommend_command)
         ],
         states={
             SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_search)],
-            RECOMMEND: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommend)],
+            RECOMMEND: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommend)]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )

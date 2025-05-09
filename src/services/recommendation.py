@@ -15,8 +15,13 @@ import pandas as pd
 import numpy as np
 from pathlib import Path
 from openai import AsyncOpenAI
+from dotenv import load_dotenv
+from rapidfuzz import process
+from sklearn.metrics.pairwise import cosine_similarity
 
 from models.book import Book
+
+load_dotenv()
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -29,7 +34,7 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 RATINGS_FILE = DATA_DIR / "book_ratings.csv"
 BOOKS_FILE = DATA_DIR / "books.csv"
 
-async def recommend_books(book_query: str, num_recommendations: int = 5) -> str:
+async def recommend_books(book_query: str, num_recommendations: int = 3) -> str:
     """
     Получение рекомендаций книг на основе запроса пользователя.
     В зависимости от наличия данных для коллаборативной фильтрации,
@@ -53,7 +58,26 @@ async def recommend_books(book_query: str, num_recommendations: int = 5) -> str:
         logger.error(f"Ошибка при получении рекомендаций: {e}")
         raise Exception(f"Ошибка при получении рекомендаций: {e}")
 
-async def recommend_books_collaborative(book_query: str, num_recommendations: int = 5) -> str:
+def find_closest_book_title(query, titles, threshold=75):
+    """
+    Поиск наиболее похожего названия книги в датасете.
+    
+    Args:
+        query: Запрос пользователя (название книги)
+        titles: Список названий книг
+        threshold: Пороговое значение схожести (по умолчанию экспертно взято значение 75)
+        
+    Returns:
+        Название книги или None, если схожесть ниже порога
+    """
+
+    match, score, idx = process.extractOne(query, titles)
+    if score >= threshold:
+        return titles[idx]
+    else:
+        return None
+
+async def recommend_books_collaborative(book_query: str, num_recommendations: int = 3) -> str:
     """
     Рекомендации книг на основе коллаборативной фильтрации.
     
@@ -64,69 +88,67 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
     Returns:
         Строка с результатом рекомендаций
     """
+
+    title_name_in_dataset = 'original_title'
+
     try:
         # Загрузка данных
         books_df = pd.read_csv(BOOKS_FILE)
         ratings_df = pd.read_csv(RATINGS_FILE)
-        
-        # Поиск книги в датасете
-        book_matches = books_df[books_df['title'].str.contains(book_query, case=False)]
-        
+
+        # Сначала пробуем прямое вхождение
+        book_matches = books_df[books_df[title_name_in_dataset].str.contains(book_query, case=False)]
+
+        # Если не найдено, ищем по схожести
         if book_matches.empty:
-            # Если книга не найдена в датасете, используем GPT API
+            closest_title = find_closest_book_title(book_query, books_df[title_name_in_dataset].tolist())
+            if closest_title:
+                book_matches = books_df[books_df[title_name_in_dataset] == closest_title]
+
+        if book_matches.empty:
             return await recommend_books_gpt(book_query, num_recommendations)
-        
-        # Берем первую найденную книгу
+
         book_id = book_matches.iloc[0]['book_id']
-        
-        # Получаем пользователей, которые оценили эту книгу
-        users_who_read = ratings_df[ratings_df['book_id'] == book_id]['user_id'].unique()
-        
-        # Если мало оценок, используем GPT API
-        if len(users_who_read) < 5:
+
+        ratings_matrix = ratings_df.pivot_table(index='user_id', columns='book_id', values='rating').fillna(0)
+        book_vectors = ratings_matrix.T
+
+        if book_id not in book_vectors.index:
             return await recommend_books_gpt(book_query, num_recommendations)
-        
-        # Получаем другие книги, которые читали эти пользователи
-        other_books = ratings_df[ratings_df['user_id'].isin(users_who_read) & 
-                             (ratings_df['book_id'] != book_id)]
-        
-        # Группируем по книгам и считаем среднюю оценку и количество оценок
-        book_stats = other_books.groupby('book_id').agg({
-            'rating': ['mean', 'count']
-        }).reset_index()
-        book_stats.columns = ['book_id', 'avg_rating', 'rating_count']
-        
-        # Фильтруем по минимальному количеству оценок
-        min_ratings = 3
-        filtered_books = book_stats[book_stats['rating_count'] >= min_ratings]
-        
-        # Сортируем по средней оценке
-        recommended_books = filtered_books.sort_values('avg_rating', ascending=False).head(num_recommendations)
-        
-        # Объединяем с информацией о книгах
-        result_df = pd.merge(recommended_books, books_df, on='book_id')
-        
-        # Формируем ответ
-        result = f"На основе книги '{book_matches.iloc[0]['title']}' рекомендую:\n\n"
-        
+
+        target_vector = book_vectors.loc[[book_id]]
+        similarities = cosine_similarity(target_vector, book_vectors)[0]
+
+        similarities_df = pd.DataFrame({
+            'book_id': book_vectors.index,
+            'similarity': similarities
+        }).sort_values('similarity', ascending=False)
+
+        similarities_df = similarities_df[similarities_df['book_id'] != book_id]
+        top_books = similarities_df.head(num_recommendations)
+
+        recommended_books = books_df[books_df['book_id'].isin(top_books['book_id'])]
+        result_df = pd.merge(recommended_books, top_books, on='book_id')
+
+        result = f"На основе книги '{book_matches.iloc[0]['title']}' рекомендую (обратите внимание, названия на английском — попробуйте найти русский перевод по названию и автору через поисковик):\n\n"
+
         for i, (_, row) in enumerate(result_df.iterrows(), 1):
             book = Book(
                 title=row['title'],
-                author=row.get('author', 'Неизвестно'),
+                authors=row.get('authors', 'Неизвестно'),
                 year=row.get('year', 'Неизвестно'),
                 description=row.get('description', 'Описание отсутствует'),
                 genre=row.get('genre', 'Неизвестно')
             )
-            result += f"{i}. 📚 {book.to_string()}\nСредняя оценка: {row['avg_rating']:.2f} (на основе {row['rating_count']} оценок)\n\n"
-        
+            result += f"{i}. 📚 {book.to_string()}\nКоэффициент схожести на основе оценок других пользователей: {row['similarity']:.2f}\n\n"
+
         return result
-    
+
     except Exception as e:
         logger.error(f"Ошибка при получении рекомендаций через коллаборативную фильтрацию: {e}")
-        # В случае ошибки используем GPT API
         return await recommend_books_gpt(book_query, num_recommendations)
 
-async def recommend_books_gpt(book_query: str, num_recommendations: int = 5) -> str:
+async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> str:
     """
     Рекомендации книг с использованием OpenAI GPT API.
     
@@ -140,43 +162,45 @@ async def recommend_books_gpt(book_query: str, num_recommendations: int = 5) -> 
     try:
         # Запрос к GPT API
         logger.info(f"Отправка запроса рекомендаций к GPT API для книги: {book_query}")
+
+        instructions = """
+            Ты - книжный эксперт. Твоя задача - порекомендовать {num_recommendations} книг, похожих на книгу,
+            указанную пользователем. Рекомендации должны быть основаны на схожести жанра, стиля, темы и т.д.
+
+            Для каждой рекомендованной книги укажи:
+            - Название
+            - Автор
+            - Год издания
+            - Краткое описание (до 100 слов)
+            - Жанр
+            - Почему она похожа на запрошенную книгу (1-2 предложения)
+            
+            Ответ должен быть в формате JSON:
+            {{
+                "original_book": {{
+                    "title": "Название исходной книги",
+                    "authors": "Авторы исходной книги через запятую и пробел, например: <Автор_1, Автор_2>"
+                }},
+                "recommendations": [
+                    {{
+                        "title": "Название книги",
+                        "authors": "Автор книги",
+                        "year": "Год издания",
+                        "description": "Краткое описание",
+                        "genre": "Жанр",
+                        "similarity": "Почему похожа на исходную книгу"
+                    }}
+                ]
+            }}
+        """
         
         response = await client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": f"""
-                Ты - книжный эксперт. Твоя задача - порекомендовать {num_recommendations} книг, похожих на книгу,
-                указанную пользователем. Рекомендации должны быть основаны на схожести жанра, стиля, темы и т.д.
-                
-                Для каждой рекомендованной книги укажи:
-                - Название
-                - Автор
-                - Год издания
-                - Краткое описание (до 100 слов)
-                - Жанр
-                - Почему она похожа на запрошенную книгу (1-2 предложения)
-                
-                Ответ должен быть в формате JSON:
-                {{
-                    "original_book": {{
-                        "title": "Название исходной книги",
-                        "author": "Автор исходной книги"
-                    }},
-                    "recommendations": [
-                        {{
-                            "title": "Название книги",
-                            "author": "Автор книги",
-                            "year": "Год издания",
-                            "description": "Краткое описание",
-                            "genre": "Жанр",
-                            "similarity": "Почему похожа на исходную книгу"
-                        }}
-                    ]
-                }}
-                """},
+                {"role": "developer", "content": instructions},
                 {"role": "user", "content": f"Порекомендуй книги, похожие на '{book_query}'"}
             ],
-            temperature=0.7,
+            # temperature=0.7,
             response_format={"type": "json_object"}
         )
         
@@ -193,21 +217,21 @@ async def recommend_books_gpt(book_query: str, num_recommendations: int = 5) -> 
         
         # Формирование ответа
         result = f"На основе книги '{original_book.get('title', book_query)}' "
-        if original_book.get('author'):
-            result += f"автора {original_book.get('author')} "
+        if original_book.get('authors'):
+            result += f"авторов {original_book.get('authors')} "
         result += "рекомендую:\n\n"
         
         for i, rec_data in enumerate(recommendations, 1):
             book = Book(
                 title=rec_data.get("title", "Неизвестно"),
-                author=rec_data.get("author", "Неизвестно"),
+                authors=rec_data.get("authors", "Неизвестно"),
                 year=rec_data.get("year", "Неизвестно"),
                 description=rec_data.get("description", "Описание отсутствует"),
                 genre=rec_data.get("genre", "Неизвестно")
             )
             result += f"{i}. 📚 {book.to_string()}\n"
             if rec_data.get("similarity"):
-                result += f"Почему похожа: {rec_data.get('similarity')}\n"
+                result += f"Чем похоже на книгу из запроса: {rec_data.get('similarity')}\n"
             result += "\n"
         
         return result
