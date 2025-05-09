@@ -31,7 +31,7 @@ client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # Определяем путь к данным для рекомендательной системы
 DATA_DIR = Path(__file__).parent.parent.parent / "data"
-RATINGS_FILE = DATA_DIR / "book_ratings.csv"
+RATINGS_FILE = DATA_DIR / "ratings.csv"
 BOOKS_FILE = DATA_DIR / "books.csv"
 
 async def recommend_books(book_query: str, num_recommendations: int = 3) -> str:

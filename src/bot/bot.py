@@ -134,7 +134,7 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         # Вызов сервиса рекомендации книг
         # По умолчанию рекомендуем 5 книг
-        result = await recommend_books(user_query, 5)
+        result = await recommend_books(user_query, 3)
         await update.message.reply_text(result)
     except Exception as e:
         logger.error(f"Ошибка при получении рекомендаций: {e}")
