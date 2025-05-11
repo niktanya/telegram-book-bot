@@ -16,15 +16,16 @@ from models.book import Book
 # Настройка логирования
 logger = logging.getLogger(__name__)
 
-async def search_book(query: str) -> str:
+async def search_book(query: str, excluded_books: list = None) -> tuple[str, list]:
     """
     Поиск книги по запросу пользователя через OpenAI GPT API.
     
     Args:
         query: Запрос пользователя (описание, автор или название книги)
+        excluded_books: Список названий книг на английском, которые нужно исключить из поиска
         
     Returns:
-        Строка с результатом поиска
+        Кортеж из (строка с результатом поиска, список найденных книг)
     """
     try:
         # Загружаем переменные окружения (можно оставить, если вдруг вызывается отдельно)
@@ -36,10 +37,15 @@ async def search_book(query: str) -> str:
         # Запрос к GPT API
         logger.info(f"Отправка запроса к GPT API: {query}")
 
-        instructions = """
+        excluded_books_str = ""
+        if excluded_books:
+            excluded_books_str = f"\nСледующие книги уже были предложены и их не нужно включать в результаты: {', '.join(excluded_books)}"
+
+        instructions = f"""
             Ты — книжный эксперт. Твоя задача — найти книгу по запросу пользователя.
             Запрос может содержать описание сюжета, автора, название или их комбинацию.
             Если есть несколько возможных вариантов, предложи до 3 наиболее подходящих книг.
+            {excluded_books_str}
 
             Для каждой книги укажи:
             - Название на русском языке (title_ru)
@@ -51,9 +57,9 @@ async def search_book(query: str) -> str:
             - Жанр на русском языке (genre)
 
             Ответ должен быть в формате JSON:
-            {
+            {{
                 "books": [
-                    {
+                    {{
                         "title_ru": "Название книги на русском",
                         "title_en": "Название книги на английском",
                         "authors_ru": "Авторы на русском",
@@ -61,9 +67,9 @@ async def search_book(query: str) -> str:
                         "year": "Год издания",
                         "description": "Краткое описание на русском",
                         "genre": "Жанр на русском"
-                    }
+                    }}
                 ]
-            }
+            }}
         """
         
         response = await client.chat.completions.create(
@@ -84,7 +90,7 @@ async def search_book(query: str) -> str:
         books = data.get("books", [])
         
         if not books:
-            return "К сожалению, не удалось найти книгу по вашему запросу. Попробуйте уточнить запрос."
+            return "К сожалению, не удалось найти книгу по вашему запросу. Попробуйте уточнить запрос.", []
         
         # Формирование ответа для пользователя
         result = "Вот что я нашел по вашему запросу:\n\n"
@@ -96,7 +102,8 @@ async def search_book(query: str) -> str:
                 f"Жанр: {book_data.get('genre', 'Неизвестно')}\n"
                 f"Описание: {book_data.get('description', 'Описание отсутствует')}\n\n"
             )
-        return result
+        
+        return result, books
     
     except Exception as e:
         logger.error(f"Ошибка при запросе к GPT API: {e}")
