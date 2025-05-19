@@ -7,7 +7,7 @@
 
 import logging
 import os
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
     CommandHandler,
@@ -15,13 +15,15 @@ from telegram.ext import (
     filters,
     ContextTypes,
     ConversationHandler,
+    CallbackQueryHandler,
 )
 
 from services.book_search import search_book
 from services.recommendation import recommend_books
+from services.database import add_book, add_rating, get_book_rating, get_user_ratings
 
 # Состояния для конверсации
-SEARCH, CHOOSE_BOOK, RECOMMEND = range(3)
+SEARCH, CHOOSE_BOOK, RECOMMEND, RATE, CHOOSE_RATING = range(5)
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -62,6 +64,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "Доступные команды:\n"
         "/search - Найти книгу по описанию, автору или названию\n"
         "/recommend - Получить рекомендации на основе книги\n"
+        "/rate - Оценить книгу (поиск + оценка)\n"
+        "/myratings - Посмотреть ваши оценки книг\n"
         "/help - Получить справку о работе бота"
     )
 
@@ -72,11 +76,20 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         return
     
     await update.message.reply_text(
-        "Я могу помочь вам найти книги и получить рекомендации.\n\n"
+        "Я могу помочь вам найти книги, получить рекомендации и оценить прочитанные книги.\n\n"
         "Доступные команды:\n"
         "/search - Найти книгу по описанию, автору или названию\n"
         "/recommend - Получить рекомендации на основе книги\n"
-        "/cancel - Отменить текущую операцию"
+        "/rate - Оценить книгу (поиск + оценка)\n"
+        "/myratings - Посмотреть ваши оценки книг\n"
+        "/cancel - Отменить текущую операцию\n\n"
+        "Как это работает:\n"
+        "1. Используйте /search или /rate для поиска книги\n"
+        "2. Выберите книгу из списка результатов\n"
+        "3. При оценке книги (/rate) вы можете:\n"
+        "   - Поставить оценку от 1 до 5 звезд\n"
+        "   - Получить рекомендации на основе книги\n"
+        "4. Используйте /myratings чтобы посмотреть все ваши оценки"
     )
 
 async def search_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -175,21 +188,54 @@ async def process_book_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
             # Сохраняем выбранную книгу в контексте
             context.user_data['selected_book'] = selected_book
             
+            # Добавляем книгу в базу данных, если её там нет
+            book_id = add_book(selected_book)
+            context.user_data['selected_book_id'] = book_id
+            
             # Убираем клавиатуру
             await update.message.reply_text(
-                f"Вы выбрали книгу: {selected_book['title_ru']}\n\n"
-                "Хотите получить рекомендации на основе этой книги?",
+                f"Вы выбрали книгу: {selected_book['title_ru']}\n\n",
                 reply_markup=ReplyKeyboardRemove()
             )
             
-            # Добавляем кнопки для выбора действия
-            keyboard = [["Да, получить рекомендации"], ["Нет, спасибо"]]
-            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-            await update.message.reply_text(
-                "Выберите действие:",
-                reply_markup=reply_markup
-            )
-            return RECOMMEND
+            # Проверяем режим работы
+            if context.user_data.get('mode') == 'rate':
+                # Проверяем, есть ли уже оценка
+                user_id = update.effective_user.id
+                existing_rating = get_book_rating(book_id, user_id)
+                
+                # Создаем inline клавиатуру для оценки
+                keyboard = []
+                for i in range(1, 6):
+                    keyboard.append([
+                        InlineKeyboardButton(
+                            f"{i} {'⭐' * i}",
+                            callback_data=f"rate_{i}"
+                        )
+                    ])
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                if existing_rating:
+                    await update.message.reply_text(
+                        f"У вас уже есть оценка для этой книги: {existing_rating} {'⭐' * existing_rating}\n"
+                        "Выберите новую оценку:",
+                        reply_markup=reply_markup
+                    )
+                else:
+                    await update.message.reply_text(
+                        "Оцените книгу от 1 до 5 звезд:",
+                        reply_markup=reply_markup
+                    )
+                return RATE
+            else:
+                # Добавляем кнопки для выбора действия
+                keyboard = [["Да, получить рекомендации"], ["Нет, спасибо"]]
+                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+                await update.message.reply_text(
+                    "Хотите получить рекомендации на основе этой книги?",
+                    reply_markup=reply_markup
+                )
+                return RECOMMEND
             
     except (ValueError, IndexError):
         await update.message.reply_text(
@@ -250,6 +296,87 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     
     return ConversationHandler.END
 
+async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработчик команды /rate"""
+    if not await check_user(update):
+        await update.message.reply_text("У вас нет доступа к этому боту.")
+        return ConversationHandler.END
+    
+    # Очищаем контекст при новом поиске
+    context.user_data.clear()
+    context.user_data['search_attempts'] = 0
+    context.user_data['mode'] = 'rate'  # Указываем, что это режим оценки
+    
+    await update.message.reply_text(
+        "Пожалуйста, введите описание, автора или название книги, которую хотите оценить."
+    )
+    return SEARCH
+
+async def process_rating_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка выбора оценки через inline кнопки"""
+    query = update.callback_query
+    await query.answer()  # Отвечаем на callback, чтобы убрать часики с кнопки
+    
+    if not await check_user(update):
+        await query.message.reply_text("У вас нет доступа к этому боту.")
+        return ConversationHandler.END
+    
+    try:
+        rating = int(query.data.split('_')[1])
+        if 1 <= rating <= 5:
+            book_id = context.user_data.get('selected_book_id')
+            user_id = query.from_user.id
+            
+            # Сохраняем оценку
+            add_rating(book_id, user_id, rating)
+            
+            # Обновляем сообщение с оценкой
+            await query.message.edit_text(
+                f"Спасибо за оценку! Вы поставили книге {rating} {'⭐' * rating}"
+            )
+            
+            # Предлагаем получить рекомендации
+            keyboard = [["Да, получить рекомендации"], ["Нет, спасибо"]]
+            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+            await query.message.reply_text(
+                "Хотите получить рекомендации на основе этой книги?",
+                reply_markup=reply_markup
+            )
+            return RECOMMEND
+            
+    except (ValueError, IndexError):
+        await query.message.reply_text(
+            "Произошла ошибка при обработке оценки. Пожалуйста, попробуйте снова."
+        )
+        return ConversationHandler.END
+
+async def my_ratings_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Обработчик команды /myratings"""
+    if not await check_user(update):
+        await update.message.reply_text("У вас нет доступа к этому боту.")
+        return
+    
+    user_id = update.effective_user.id
+    ratings = get_user_ratings(user_id)
+    
+    if not ratings:
+        await update.message.reply_text(
+            "У вас пока нет оцененных книг. Используйте команду /rate для оценки книг."
+        )
+        return
+    
+    # Формируем сообщение со списком оценок
+    result = "Ваши оценки книг:\n\n"
+    for rating_data in ratings:
+        result += (
+            f"📚 *{rating_data['title_ru']}*\n"
+            f"Авторы: {rating_data['authors_ru']}\n"
+            f"Ваша оценка: {rating_data['rating']} {'⭐' * rating_data['rating']}\n"
+            f"Жанр: {rating_data['genre']}\n\n"
+        )
+    
+    await update.message.reply_text(result)
+
 async def recommend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /recommend"""
     if not await check_user(update):
@@ -279,7 +406,8 @@ def run_bot(token: str) -> None:
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler("search", search_command),
-            CommandHandler("recommend", recommend_command)
+            CommandHandler("recommend", recommend_command),
+            CommandHandler("rate", rate_command)
         ],
         states={
             SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_search)],
@@ -287,7 +415,8 @@ def run_bot(token: str) -> None:
             RECOMMEND: [
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommendation_choice),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommend)
-            ]
+            ],
+            RATE: [CallbackQueryHandler(process_rating_callback, pattern=r"^rate_\d+$")]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )
@@ -295,6 +424,7 @@ def run_bot(token: str) -> None:
     # Регистрация обработчиков
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("myratings", my_ratings_command))
     application.add_handler(conv_handler)
     
     # Запуск бота
