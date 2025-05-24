@@ -18,6 +18,10 @@ logger = logging.getLogger(__name__)
 DB_DIR = Path(__file__).parent.parent.parent / "data"
 DB_FILE = DB_DIR / "books.db"
 
+# Определяем пути к CSV файлам
+BOOKS_FILE = DB_DIR / "books.csv"
+RATINGS_FILE = DB_DIR / "ratings.csv"
+
 def init_db() -> None:
     """Инициализация базы данных"""
     try:
