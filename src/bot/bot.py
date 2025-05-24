@@ -23,7 +23,7 @@ from services.recommendation import recommend_books
 from services.database import add_book, add_rating, get_book_rating, get_user_ratings
 
 # Состояния для конверсации
-SEARCH, CHOOSE_BOOK, RECOMMEND, RATE, CHOOSE_RATING = range(5)
+SEARCH, CHOOSE_BOOK, RECOMMEND_FROM_RATE, RECOMMEND_DIRECT, RATE, CHOOSE_RATING = range(6)
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -235,7 +235,7 @@ async def process_book_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
                     "Хотите получить рекомендации на основе этой книги?",
                     reply_markup=reply_markup
                 )
-                return RECOMMEND
+                return RECOMMEND_FROM_RATE
             
     except (ValueError, IndexError):
         await update.message.reply_text(
@@ -244,7 +244,7 @@ async def process_book_choice(update: Update, context: ContextTypes.DEFAULT_TYPE
         return CHOOSE_BOOK
 
 async def process_recommendation_choice(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка выбора пользователя относительно получения рекомендаций"""
+    """Обработка выбора пользователя относительно получения рекомендаций после оценки"""
     if not await check_user(update):
         await update.message.reply_text("У вас нет доступа к этому боту.")
         return ConversationHandler.END
@@ -276,7 +276,7 @@ async def process_recommendation_choice(update: Update, context: ContextTypes.DE
     return ConversationHandler.END
 
 async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка запроса на рекомендацию книг"""
+    """Обработка прямого запроса на рекомендацию книг"""
     if not await check_user(update):
         await update.message.reply_text("У вас нет доступа к этому боту.")
         return ConversationHandler.END
@@ -342,7 +342,7 @@ async def process_rating_callback(update: Update, context: ContextTypes.DEFAULT_
                 "Хотите получить рекомендации на основе этой книги?",
                 reply_markup=reply_markup
             )
-            return RECOMMEND
+            return RECOMMEND_FROM_RATE
             
     except (ValueError, IndexError):
         await query.message.reply_text(
@@ -386,7 +386,7 @@ async def recommend_command(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     await update.message.reply_text(
         "Пожалуйста, введите название книги, на основе которой вы хотите получить рекомендации."
     )
-    return RECOMMEND
+    return RECOMMEND_DIRECT
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /cancel"""
@@ -412,10 +412,8 @@ def run_bot(token: str) -> None:
         states={
             SEARCH: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_search)],
             CHOOSE_BOOK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_book_choice)],
-            RECOMMEND: [
-                MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommendation_choice),
-                MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommend)
-            ],
+            RECOMMEND_FROM_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommendation_choice)],
+            RECOMMEND_DIRECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommend)],
             RATE: [CallbackQueryHandler(process_rating_callback, pattern=r"^rate_\d+$")]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
