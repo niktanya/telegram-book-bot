@@ -225,5 +225,76 @@ def get_user_ratings(user_id: int) -> List[Dict[str, Any]]:
         logger.error(f"Ошибка при получении оценок пользователя из базы данных: {e}")
         raise
 
+def load_data_from_csv() -> None:
+    """
+    Загрузка данных из CSV файлов в базу данных.
+    Загружает книги и оценки, если они еще не загружены.
+    """
+    try:
+        import pandas as pd
+        
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            
+            # Проверяем, есть ли уже данные в таблице books
+            cursor.execute("SELECT COUNT(*) FROM books")
+            books_count = cursor.fetchone()[0]
+            
+            if books_count == 0 and BOOKS_FILE.exists():
+                logger.info("Загрузка книг из CSV файла...")
+                books_df = pd.read_csv(BOOKS_FILE)
+                
+                # Подготавливаем данные для вставки
+                books_data = []
+                for _, row in books_df.iterrows():
+                    book_data = {
+                        'title_en': row['original_title'],
+                        'title_ru': row['title'],  # Используем title как русское название
+                        'authors_en': row['authors'],
+                        'authors_ru': row['authors'],  # Используем тех же авторов
+                        'year': str(row['original_publication_year']),
+                        'description': None,  # В CSV нет описаний
+                        'genre': None  # В CSV нет жанров
+                    }
+                    books_data.append(book_data)
+                
+                # Добавляем книги в базу
+                for book_data in books_data:
+                    add_book(book_data)
+                
+                logger.info(f"Загружено {len(books_data)} книг")
+            
+            # Проверяем, есть ли уже данные в таблице ratings
+            cursor.execute("SELECT COUNT(*) FROM ratings")
+            ratings_count = cursor.fetchone()[0]
+            
+            if ratings_count == 0 and RATINGS_FILE.exists():
+                logger.info("Загрузка оценок из CSV файла...")
+                ratings_df = pd.read_csv(RATINGS_FILE)
+                
+                # Добавляем оценки в базу
+                for _, row in ratings_df.iterrows():
+                    try:
+                        # Проверяем, что книга существует
+                        cursor.execute("SELECT book_id FROM books WHERE book_id = ?", (row['book_id'],))
+                        if cursor.fetchone():
+                            # Используем user_id из CSV как Telegram user_id
+                            # Округляем рейтинг до целого числа от 1 до 5
+                            rating = max(1, min(5, round(row['rating'])))
+                            add_rating(row['book_id'], row['user_id'], rating)
+                    except Exception as e:
+                        logger.error(f"Ошибка при добавлении оценки {row['book_id']}: {e}")
+                        continue
+                
+                logger.info(f"Загружено оценок из CSV")
+            
+            conn.commit()
+            
+    except Exception as e:
+        logger.error(f"Ошибка при загрузке данных из CSV: {e}")
+        raise
+
 # Инициализируем базу данных при импорте модуля
-init_db() 
+init_db()
+# Загружаем данные из CSV, если их еще нет
+load_data_from_csv() 
