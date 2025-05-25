@@ -10,6 +10,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import Optional, List, Dict, Any
+import pandas as pd
 
 # Настройка логирования
 logger = logging.getLogger(__name__)
@@ -235,8 +236,6 @@ def load_data_from_csv() -> None:
     Загружает книги и оценки, если они еще не загружены.
     """
     try:
-        import pandas as pd
-        
         with sqlite3.connect(DB_FILE) as conn:
             cursor = conn.cursor()
             
@@ -296,6 +295,94 @@ def load_data_from_csv() -> None:
             
     except Exception as e:
         logger.error(f"Ошибка при загрузке данных из CSV: {e}")
+        raise
+
+def get_all_books() -> pd.DataFrame:
+    """
+    Получение всех книг из базы данных в виде DataFrame.
+    
+    Returns:
+        DataFrame с книгами
+    """
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            return pd.read_sql_query("""
+                SELECT book_id, title_en, title_ru, authors_en, authors_ru, 
+                       year, description, genre
+                FROM books
+            """, conn)
+    except Exception as e:
+        logger.error(f"Ошибка при получении книг из базы данных: {e}")
+        raise
+
+def get_all_ratings() -> pd.DataFrame:
+    """
+    Получение всех оценок из базы данных в виде DataFrame.
+    
+    Returns:
+        DataFrame с оценками
+    """
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            return pd.read_sql_query("""
+                SELECT user_id, book_id, rating
+                FROM ratings
+            """, conn)
+    except Exception as e:
+        logger.error(f"Ошибка при получении оценок из базы данных: {e}")
+        raise
+
+def get_book_by_title(title: str) -> Optional[Dict[str, Any]]:
+    """
+    Поиск книги по названию (точное или частичное совпадение).
+    
+    Args:
+        title: Название книги
+        
+    Returns:
+        Словарь с данными книги или None
+    """
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            
+            # Сначала ищем точное совпадение
+            cursor.execute("""
+                SELECT * FROM books 
+                WHERE title_en LIKE ? OR title_ru LIKE ?
+            """, (f"%{title}%", f"%{title}%"))
+            
+            columns = [description[0] for description in cursor.description]
+            book = cursor.fetchone()
+            
+            if book:
+                return dict(zip(columns, book))
+            return None
+            
+    except Exception as e:
+        logger.error(f"Ошибка при поиске книги по названию: {e}")
+        raise
+
+def get_user_ratings(user_id: int) -> pd.DataFrame:
+    """
+    Получение всех оценок пользователя.
+    
+    Args:
+        user_id: ID пользователя
+        
+    Returns:
+        DataFrame с оценками пользователя
+    """
+    try:
+        with sqlite3.connect(DB_FILE) as conn:
+            return pd.read_sql_query("""
+                SELECT r.*, b.title_ru, b.authors_ru, b.genre
+                FROM ratings r
+                JOIN books b ON r.book_id = b.book_id
+                WHERE r.user_id = ?
+            """, conn, params=(user_id,))
+    except Exception as e:
+        logger.error(f"Ошибка при получении оценок пользователя: {e}")
         raise
 
 # Инициализируем базу данных при импорте модуля

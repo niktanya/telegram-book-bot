@@ -7,6 +7,7 @@
 
 import logging
 import os
+import json
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
     Application,
@@ -276,25 +277,75 @@ async def process_recommendation_choice(update: Update, context: ContextTypes.DE
     return ConversationHandler.END
 
 async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Обработка прямого запроса на рекомендацию книг"""
-    if not await check_user(update):
-        await update.message.reply_text("У вас нет доступа к этому боту.")
-        return ConversationHandler.END
-    
-    user_query = update.message.text
-    await update.message.reply_text("Ищу рекомендации на основе книги... Это может занять некоторое время.")
-    
+    """
+    Обработка запроса на рекомендации книг.
+    """
     try:
-        # Вызов сервиса рекомендации книг
-        result = await recommend_books(user_query, 3)
-        await update.message.reply_text(result)
-    except Exception as e:
-        logger.error(f"Ошибка при получении рекомендаций: {e}")
+        user_id = update.effective_user.id
+        if user_id not in ALLOWED_USERS:
+            await update.message.reply_text("Извините, у вас нет доступа к боту.")
+            return ConversationHandler.END
+
+        book_query = update.message.text.strip()
+        if not book_query:
+            await update.message.reply_text("Пожалуйста, введите название книги или описание.")
+            return RECOMMEND_DIRECT
+
+        # Получаем рекомендации
+        recommendations_json = await recommend_books(book_query)
+        recommendations = json.loads(recommendations_json)
+
+        if not recommendations:
+            await update.message.reply_text(
+                "К сожалению, не удалось найти подходящие рекомендации. "
+                "Попробуйте изменить запрос или использовать поиск книг через /search."
+            )
+            return ConversationHandler.END
+
+        # Формируем сообщение с рекомендациями
+        message = "📚 Вот книги, которые могут вам понравиться:\n\n"
+        
+        for i, book in enumerate(recommendations, 1):
+            similarity = book.get('similarity', 0)
+            message += (
+                f"{i}. <b>{book['title']}</b>\n"
+                f"👤 Авторы: {book['authors']}\n"
+                f"📅 Год: {book['year']}\n"
+                f"📖 Описание: {book['description']}\n"
+                f"🏷 Жанр: {book['genre']}\n"
+            )
+            if similarity > 0:
+                message += f"📊 Схожесть: {similarity:.2f}\n"
+            message += "\n"
+
+        # Добавляем кнопки для оценки книг
+        keyboard = []
+        for i in range(len(recommendations)):
+            keyboard.append([
+                InlineKeyboardButton(f"Оценить книгу {i+1}", callback_data=f"rate_{i}")
+            ])
+        keyboard.append([InlineKeyboardButton("Искать еще раз", callback_data="search_again")])
+        
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
         await update.message.reply_text(
-            "Произошла ошибка при поиске рекомендаций. Пожалуйста, попробуйте снова позже."
+            message,
+            reply_markup=reply_markup,
+            parse_mode='HTML'
         )
-    
-    return ConversationHandler.END
+        
+        # Сохраняем рекомендации в контексте
+        context.user_data['current_recommendations'] = recommendations
+        
+        return RECOMMEND_CHOICE
+
+    except Exception as e:
+        logger.error(f"Ошибка при обработке рекомендаций: {e}")
+        await update.message.reply_text(
+            "Произошла ошибка при получении рекомендаций. "
+            "Пожалуйста, попробуйте позже или используйте поиск книг через /search."
+        )
+        return ConversationHandler.END
 
 async def rate_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Обработчик команды /rate"""

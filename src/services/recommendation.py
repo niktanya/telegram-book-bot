@@ -18,6 +18,15 @@ from openai import AsyncOpenAI
 from dotenv import load_dotenv
 from rapidfuzz import process
 from sklearn.metrics.pairwise import cosine_similarity
+from typing import List, Dict, Any, Optional
+from difflib import SequenceMatcher
+from services.database import (
+    get_all_books, 
+    get_all_ratings, 
+    get_book_by_title,
+    get_book_by_id,
+    get_user_ratings
+)
 
 from models.book import Book
 
@@ -37,26 +46,26 @@ BOOKS_FILE = DATA_DIR / "books.csv"
 async def recommend_books(book_query: str, num_recommendations: int = 3) -> str:
     """
     Получение рекомендаций книг на основе запроса пользователя.
-    В зависимости от наличия данных для коллаборативной фильтрации,
-    использует либо датасет оценок, либо OpenAI GPT API.
     
     Args:
-        book_query: Запрос пользователя (название книги)
+        book_query: Запрос пользователя (название книги или описание)
         num_recommendations: Количество рекомендаций
         
     Returns:
-        Строка с результатом рекомендаций
+        Строка с рекомендациями в формате JSON
     """
     try:
-        # Проверяем наличие данных для коллаборативной фильтрации
-        if RATINGS_FILE.exists() and BOOKS_FILE.exists():
+        # Проверяем наличие данных в базе
+        books_df = get_all_books()
+        ratings_df = get_all_ratings()
+        
+        if not books_df.empty and not ratings_df.empty:
             return await recommend_books_collaborative(book_query, num_recommendations)
         else:
-            # Если данных нет, используем GPT API
             return await recommend_books_gpt(book_query, num_recommendations)
     except Exception as e:
         logger.error(f"Ошибка при получении рекомендаций: {e}")
-        raise Exception(f"Ошибка при получении рекомендаций: {e}")
+        raise
 
 def find_closest_book_title(query, titles, threshold=75):
     """
@@ -86,69 +95,57 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
         num_recommendations: Количество рекомендаций
         
     Returns:
-        Строка с результатом рекомендаций
+        Строка с рекомендациями в формате JSON
     """
-
-    title_name_in_dataset = 'original_title'
-
     try:
-        # Загрузка данных
-        books_df = pd.read_csv(BOOKS_FILE)
-        ratings_df = pd.read_csv(RATINGS_FILE)
-
-        # Сначала пробуем прямое вхождение
-        book_matches = books_df[books_df[title_name_in_dataset].str.contains(book_query, case=False)]
-
-        # Если не найдено, ищем по схожести
-        if book_matches.empty:
-            closest_title = find_closest_book_title(book_query, books_df[title_name_in_dataset].tolist())
-            if closest_title:
-                logger.info(f"Нашли наиболее похожее название книги, {closest_title}")
-                book_matches = books_df[books_df[title_name_in_dataset] == closest_title]
-
-        if book_matches.empty:
-            logger.info("Нет мэтча по датасету для коллаборативной фильтрации")
+        # Получаем данные из базы
+        books_df = get_all_books()
+        ratings_df = get_all_ratings()
+        
+        # Ищем книгу в базе
+        book = get_book_by_title(book_query)
+        if not book:
+            logger.info("Книга не найдена в базе данных")
             return await recommend_books_gpt(book_query, num_recommendations)
-
-        book_id = book_matches.iloc[0]['book_id']
-
-        ratings_matrix = ratings_df.pivot_table(index='user_id', columns='book_id', values='rating').fillna(0)
-        book_vectors = ratings_matrix.T
-
-        if book_id not in book_vectors.index:
-            logger.info("У выбранной книги нет оценок пользователей -> не можем получить косинусовое сходтство и использовать коллаборативную фильтрацию")
-            return await recommend_books_gpt(book_query, num_recommendations)
-
-        target_vector = book_vectors.loc[[book_id]]
-        similarities = cosine_similarity(target_vector, book_vectors)[0]
-
-        similarities_df = pd.DataFrame({
-            'book_id': book_vectors.index,
-            'similarity': similarities
-        }).sort_values('similarity', ascending=False)
-
-        similarities_df = similarities_df[similarities_df['book_id'] != book_id]
-        top_books = similarities_df.head(num_recommendations)
-
-        recommended_books = books_df[books_df['book_id'].isin(top_books['book_id'])]
-        result_df = pd.merge(recommended_books, top_books, on='book_id')
-
-        result = f"На основе книги '{book_matches.iloc[0]['title']}' рекомендую (обратите внимание, названия на английском — попробуйте найти русский перевод по названию и автору через поисковик):\n\n"
-
-        for i, (_, row) in enumerate(result_df.iterrows(), 1):
-            book = Book(
-                title=row['title'],
-                authors=row.get('authors', 'Неизвестно'),
-                year=row.get('year', 'Неизвестно'),
-                description=row.get('description', 'Описание отсутствует'),
-                genre=row.get('genre', 'Неизвестно')
-            )
-            result += f"{i}. 📚 {book.to_string()}\nКоэффициент схожести на основе оценок других пользователей: {row['similarity']:.2f}\n\n"
-
-        return result
-
+        
+        book_id = book['book_id']
+        
+        # Создаем матрицу оценок
+        ratings_matrix = ratings_df.pivot_table(
+            index='user_id', 
+            columns='book_id', 
+            values='rating'
+        ).fillna(0)
+        
+        # Вычисляем косинусное сходство между книгами
+        book_similarity = cosine_similarity(ratings_matrix.T)
+        book_similarity_df = pd.DataFrame(
+            book_similarity,
+            index=ratings_matrix.columns,
+            columns=ratings_matrix.columns
+        )
+        
+        # Получаем похожие книги
+        similar_books = book_similarity_df[book_id].sort_values(ascending=False)[1:num_recommendations+1]
+        
+        # Формируем рекомендации
+        recommendations = []
+        for similar_book_id, similarity in similar_books.items():
+            book_data = get_book_by_id(similar_book_id)
+            if book_data:
+                recommendations.append({
+                    "title": book_data['title_ru'],
+                    "authors": book_data['authors_ru'],
+                    "year": book_data['year'],
+                    "description": book_data['description'],
+                    "genre": book_data['genre'],
+                    "similarity": float(similarity)
+                })
+        
+        return json.dumps(recommendations, ensure_ascii=False)
+        
     except Exception as e:
-        logger.error(f"Ошибка при получении рекомендаций через коллаборативную фильтрацию: {e}")
+        logger.error(f"Ошибка при коллаборативной фильтрации: {e}")
         return await recommend_books_gpt(book_query, num_recommendations)
 
 async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> str:
