@@ -8,6 +8,8 @@ from services.database import (
     add_book,
     add_rating
 )
+import sqlite3
+from services.database import DB_FILE
 
 class TestDatabase(unittest.TestCase):
     def test_get_all_books(self):
@@ -67,13 +69,15 @@ class TestDatabase(unittest.TestCase):
         
         # Тестируем получение оценок существующего пользователя
         ratings = get_user_ratings(first_user_id)
-        self.assertFalse(ratings.empty)
-        self.assertIn('rating', ratings.columns)
-        self.assertIn('title_ru', ratings.columns)
+        self.assertIsInstance(ratings, list)
+        self.assertTrue(len(ratings) > 0)
+        self.assertIn('rating', ratings[0])
+        self.assertIn('title_ru', ratings[0])
         
         # Тестируем получение оценок несуществующего пользователя
-        ratings = get_user_ratings(999999)
-        self.assertTrue(ratings.empty)
+        ratings = get_user_ratings(999998)  # гарантированно несуществующий user_id
+        self.assertIsInstance(ratings, list)
+        self.assertEqual(len(ratings), 0)
 
     def test_add_and_get_rating(self):
         """Тест добавления и получения оценки"""
@@ -96,11 +100,16 @@ class TestDatabase(unittest.TestCase):
         
         # Проверяем, что оценка добавилась
         ratings = get_user_ratings(test_user_id)
-        self.assertFalse(ratings.empty)
+        self.assertTrue(len(ratings) > 0)
         self.assertTrue(any(
-            (ratings['book_id'] == book_id) & 
-            (ratings['rating'] == test_rating)
+            (r['book_id'] == book_id and r['rating'] == test_rating) for r in ratings
         ))
+        # Удаляем тестовую оценку и книгу
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            cursor.execute("DELETE FROM ratings WHERE user_id = ? AND book_id = ?", (test_user_id, book_id))
+            cursor.execute("DELETE FROM books WHERE book_id = ?", (book_id,))
+            conn.commit()
 
 if __name__ == '__main__':
     unittest.main() 

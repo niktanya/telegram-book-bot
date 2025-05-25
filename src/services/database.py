@@ -210,7 +210,8 @@ def get_user_ratings(user_id: int) -> List[Dict[str, Any]]:
             cursor = conn.cursor()
             
             cursor.execute("""
-                SELECT r.rating, b.* 
+                SELECT r.rating_id, r.book_id, r.user_id, r.rating, r.created_at,
+                       b.title_ru, b.authors_ru, b.genre
                 FROM ratings r
                 JOIN books b ON r.book_id = b.book_id
                 WHERE r.user_id = ?
@@ -361,28 +362,6 @@ def get_book_by_title(title: str) -> Optional[Dict[str, Any]]:
             
     except Exception as e:
         logger.error(f"Ошибка при поиске книги по названию: {e}")
-        raise
-
-def get_user_ratings(user_id: int) -> pd.DataFrame:
-    """
-    Получение всех оценок пользователя.
-    
-    Args:
-        user_id: ID пользователя
-        
-    Returns:
-        DataFrame с оценками пользователя
-    """
-    try:
-        with sqlite3.connect(DB_FILE) as conn:
-            return pd.read_sql_query("""
-                SELECT r.*, b.title_ru, b.authors_ru, b.genre
-                FROM ratings r
-                JOIN books b ON r.book_id = b.book_id
-                WHERE r.user_id = ?
-            """, conn, params=(user_id,))
-    except Exception as e:
-        logger.error(f"Ошибка при получении оценок пользователя: {e}")
         raise
 
 # Инициализируем базу данных при импорте модуля

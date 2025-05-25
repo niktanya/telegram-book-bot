@@ -6,7 +6,7 @@ from services.recommendation import (
     recommend_books_collaborative,
     recommend_books_gpt
 )
-from database import get_all_ratings, get_user_ratings
+from services.database import get_all_ratings, get_user_ratings
 
 class TestRecommendation(unittest.TestCase):
     def setUp(self):
