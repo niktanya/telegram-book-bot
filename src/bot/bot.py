@@ -337,7 +337,7 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Сохраняем рекомендации в контексте
         context.user_data['current_recommendations'] = recommendations
         
-        return RECOMMEND_CHOICE
+        return ConversationHandler.END
 
     except Exception as e:
         logger.error(f"Ошибка при обработке рекомендаций: {e}")
