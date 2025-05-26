@@ -43,7 +43,7 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 RATINGS_FILE = DATA_DIR / "ratings.csv"
 BOOKS_FILE = DATA_DIR / "books.csv"
 
-async def recommend_books(book_query: str, num_recommendations: int = 3) -> str:
+async def recommend_books(book_query: str, num_recommendations: int = 3) -> List[Dict[str, Any]]:
     """
     Получение рекомендаций книг на основе запроса пользователя.
     
@@ -52,7 +52,7 @@ async def recommend_books(book_query: str, num_recommendations: int = 3) -> str:
         num_recommendations: Количество рекомендаций
         
     Returns:
-        Строка с рекомендациями в формате JSON
+        Список словарей с рекомендациями
     """
     try:
         # Проверяем наличие данных в базе
@@ -103,11 +103,36 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
         ratings_df = get_all_ratings()
         
         # Ищем книгу в базе
-        book = get_book_by_title(book_query)
+        book = get_book_by_title(book_query) # Попытка найти по введенному названию
+
         if not book:
-            logger.info("Книга не найдена в базе данных")
-            return await recommend_books_gpt(book_query, num_recommendations)
-        
+            logger.info(f"Книга '{book_query}' не найдена в базе по точному или частичному совпадению.")
+            # Если не найдена, пытаемся найти наиболее похожее название во всей базе
+            all_books_titles = books_df['title_ru'].tolist() # Используем русские названия для поиска похожего
+            closest_title = find_closest_book_title(book_query, all_books_titles)
+
+            if closest_title:
+                logger.info(f"Найдено наиболее похожее название: '{closest_title}'.")
+                # Получаем данные книги по похожему названию
+                book = get_book_by_title(closest_title)
+                if book:
+                     logger.info(f"Книга с похожим названием найдена в базе. ID: {book['book_id']}")
+                else:
+                     logger.error(f"Ошибка: Не удалось получить данные книги по похожему названию '{closest_title}'")
+                     # Если даже по похожему названию не нашли, переходим к GPT
+                     return await recommend_books_gpt(book_query, num_recommendations) # fallback к GPT
+            else:
+                 logger.info(f"Не найдено похожее название книги для запроса '{book_query}'.")
+                 # Если не найдено похожее название, переходим к GPT
+                 return await recommend_books_gpt(book_query, num_recommendations) # fallback к GPT
+
+        # Если книга найдена (либо по точному, либо по похожему названию)
+        if not book:
+             # Это ветка для случая, когда get_book_by_title вернул None, и find_closest_book_title тоже не нашел или get_book_by_title по closest_title вернул None
+             # Этот случай уже обработан выше, но оставим для уверенности
+             logger.info("Книга не найдена в базе данных после всех попыток.")
+             return await recommend_books_gpt(book_query, num_recommendations) # fallback к GPT
+
         book_id = book['book_id']
         
         # Создаем матрицу оценок
@@ -117,6 +142,13 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
             values='rating'
         ).fillna(0)
         
+        # Дополнительное логирование: выводим размеры матрицы и количество оценок для book_id
+        logger.info(f"Размеры матрицы оценок (ratings_matrix): {ratings_matrix.shape}.")
+        book_ratings_count = ratings_df[ ratings_df['book_id'] == book_id ].count()
+        logger.info(f"Количество оценок для book_id {book_id} (Harry Potter and the Philosopher's Stone): {book_ratings_count}.")
+        # (опционально) выводим первые несколько строк ratings_df, чтобы убедиться, что данные загружаются корректно
+        logger.info("Первые 5 строк ratings_df (для проверки загрузки данных):\n" + str(ratings_df.head(5)))
+
         # Вычисляем косинусное сходство между книгами
         book_similarity = cosine_similarity(ratings_matrix.T)
         book_similarity_df = pd.DataFrame(
@@ -139,7 +171,8 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
                     "year": book_data['year'],
                     "description": book_data['description'],
                     "genre": book_data['genre'],
-                    "similarity": float(similarity)
+                    "similarity": float(similarity),
+                    "book_id": similar_book_id
                 })
         
         return json.dumps(recommendations, ensure_ascii=False)
@@ -213,14 +246,16 @@ async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> 
         recommendations = data.get("recommendations", [])
         
         if not recommendations:
-            return "К сожалению, не удалось найти рекомендации для указанной книги. Попробуйте ввести более известную книгу."
+            # Возвращаем пустой список, если рекомендаций нет
+            return []
         
-        # Формирование ответа
-        result = f"На основе книги '{original_book.get('title', book_query)}' "
-        if original_book.get('authors'):
-            result += f"авторов {original_book.get('authors')} "
-        result += "рекомендую:\n\n"
+        # Формирование ответа (теперь возвращаем список словарей)
+        # result = f"На основе книги '{original_book.get('title', book_query)}' "
+        # if original_book.get('authors'):
+        #     result += f"авторов {original_book.get('authors')} "
+        # result += "рекомендую:\n\n"
         
+        processed_recommendations = []
         for i, rec_data in enumerate(recommendations, 1):
             book = Book(
                 title=rec_data.get("title", "Неизвестно"),
@@ -229,12 +264,23 @@ async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> 
                 description=rec_data.get("description", "Описание отсутствует"),
                 genre=rec_data.get("genre", "Неизвестно")
             )
-            result += f"{i}. 📚 {book.to_string()}\n"
-            if rec_data.get("similarity"):
-                result += f"Чем похоже на книгу из запроса: {rec_data.get('similarity')}\n"
-            result += "\n"
-        
-        return result
+            # Попытка найти книгу в базе по названию и добавить book_id
+            book_in_db = get_book_by_title(book.title)
+            if book_in_db:
+                rec_data['book_id'] = book_in_db['book_id']
+
+            # Добавляем обработанные данные книги в список
+            processed_recommendations.append({
+                "title": book.title,
+                "authors": book.authors,
+                "year": book.year,
+                "description": book.description,
+                "genre": book.genre,
+                "similarity": rec_data.get("similarity", "Неизвестно"), # GPT может вернуть текстовое объяснение
+                "book_id": rec_data.get('book_id') # book_id может отсутствовать
+            })
+
+        return processed_recommendations
     
     except Exception as e:
         logger.error(f"Ошибка при запросе рекомендаций к GPT API: {e}")

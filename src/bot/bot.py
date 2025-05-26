@@ -21,7 +21,7 @@ from telegram.ext import (
 
 from services.book_search import search_book
 from services.recommendation import recommend_books
-from services.database import add_book, add_rating, get_book_rating, get_user_ratings
+from services.database import add_book, add_rating, get_book_rating, get_user_ratings, get_book_by_id
 
 # Состояния для конверсации
 SEARCH, CHOOSE_BOOK, RECOMMEND_FROM_RATE, RECOMMEND_DIRECT, RATE, CHOOSE_RATING = range(6)
@@ -281,19 +281,13 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     Обработка запроса на рекомендации книг.
     """
     try:
-        user_id = update.effective_user.id
-        if user_id not in ALLOWED_USERS:
-            await update.message.reply_text("Извините, у вас нет доступа к боту.")
-            return ConversationHandler.END
-
         book_query = update.message.text.strip()
         if not book_query:
             await update.message.reply_text("Пожалуйста, введите название книги или описание.")
             return RECOMMEND_DIRECT
 
         # Получаем рекомендации
-        recommendations_json = await recommend_books(book_query)
-        recommendations = json.loads(recommendations_json)
+        recommendations = await recommend_books(book_query)
 
         if not recommendations:
             await update.message.reply_text(
@@ -306,26 +300,49 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         message = "📚 Вот книги, которые могут вам понравиться:\n\n"
         
         for i, book in enumerate(recommendations, 1):
+            # Теперь book - это словарь, полученный от recommend_books
+            title = book.get('title', 'Неизвестно') # Используем .get для безопасности
+            authors = book.get('authors', 'Неизвестно')
+            year = book.get('year', 'Неизвестно')
+            description = book.get('description', 'Описание отсутствует')
+            genre = book.get('genre', 'Неизвестно')
             similarity = book.get('similarity', 0)
+
             message += (
-                f"{i}. <b>{book['title']}</b>\n"
-                f"👤 Авторы: {book['authors']}\n"
-                f"📅 Год: {book['year']}\n"
-                f"📖 Описание: {book['description']}\n"
-                f"🏷 Жанр: {book['genre']}\n"
+                f"{i}. <b>{title}</b>\n"
+                f"👤 Авторы: {authors}\n"
+                f"📅 Год: {year}\n"
+                f"📖 Описание: {description}\n"
+                f"🏷 Жанр: {genre}\n"
             )
-            if similarity > 0:
-                message += f"📊 Схожесть: {similarity:.2f}\n"
+            # Проверка на тип схожести (может быть числом от коллаб. фильтрации или строкой от GPT)
+            if isinstance(similarity, float) and similarity > 0:
+                 message += f"📊 Схожесть: {similarity:.2f}\n"
+            elif isinstance(similarity, str) and similarity:
+                 message += f"📊 Чем похоже: {similarity}\n"
+
             message += "\n"
 
         # Добавляем кнопки для оценки книг
         keyboard = []
-        for i in range(len(recommendations)):
-            keyboard.append([
-                InlineKeyboardButton(f"Оценить книгу {i+1}", callback_data=f"rate_{i}")
-            ])
-        keyboard.append([InlineKeyboardButton("Искать еще раз", callback_data="search_again")])
-        
+        for i, book in enumerate(recommendations):
+            # Проверяем, есть ли book_id у рекомендованной книги и он не None
+            if 'book_id' in book and book['book_id'] is not None:
+                keyboard.append([
+                    InlineKeyboardButton(f"Оценить книгу {i+1}", callback_data=f"rate_rec_{book['book_id']}")
+                ])
+        # Добавляем кнопку "Искать еще раз" только если есть рекомендации с book_id
+        if keyboard:
+            keyboard.append([InlineKeyboardButton("Искать еще раз", callback_data="search_again")])
+
+        # Если рекомендаций с book_id нет, можно не добавлять никаких кнопок или только "Искать еще раз"
+        # Если рекомендаций вообще нет (пустой список), этот блок не выполнится
+        # Если рекомендации есть, но без book_id (например, только от GPT и не нашлись в базе), то добавится только "Искать еще раз" (если keyboard изначально пустая, а потом в нее добавится эта кнопка)
+        # Упростим: добавляем кнопку "Искать еще раз" всегда, если есть хоть какие-то рекомендации
+        if not keyboard and recommendations: # Если keyboard пустая, но рекомендации есть
+             keyboard.append([InlineKeyboardButton("Искать еще раз", callback_data="search_again")])
+
+
         reply_markup = InlineKeyboardMarkup(keyboard)
         
         await update.message.reply_text(
@@ -373,31 +390,112 @@ async def process_rating_callback(update: Update, context: ContextTypes.DEFAULT_
         return ConversationHandler.END
     
     try:
-        rating = int(query.data.split('_')[1])
-        if 1 <= rating <= 5:
-            book_id = context.user_data.get('selected_book_id')
-            user_id = query.from_user.id
-            
-            # Сохраняем оценку
-            add_rating(book_id, user_id, rating)
-            
-            # Обновляем сообщение с оценкой
-            await query.message.edit_text(
-                f"Спасибо за оценку! Вы поставили книге {rating} {'⭐' * rating}"
-            )
-            
-            # Предлагаем получить рекомендации
-            keyboard = [["Да, получить рекомендации"], ["Нет, спасибо"]]
-            reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-            await query.message.reply_text(
-                "Хотите получить рекомендации на основе этой книги?",
-                reply_markup=reply_markup
-            )
-            return RECOMMEND_FROM_RATE
-            
+        data_parts = query.data.split('_')
+        action = data_parts[0]
+
+        if action == 'rate': # Обработка кнопок оценки после поиска
+            rating = int(data_parts[1])
+            if 1 <= rating <= 5:
+                book_id = context.user_data.get('selected_book_id') # Берем book_id из контекста
+                user_id = query.from_user.id
+                
+                if book_id is None:
+                     await query.message.reply_text("Произошла ошибка: не удалось определить книгу для оценки.")
+                     return ConversationHandler.END
+
+                # Сохраняем оценку
+                add_rating(book_id, user_id, rating)
+                
+                # Обновляем сообщение с оценкой
+                await query.message.edit_text(
+                    f"Спасибо за оценку! Вы поставили книге {rating} {'⭐' * rating}"
+                )
+                
+                # Предлагаем получить рекомендации
+                keyboard = [["Да, получить рекомендации"], ["Нет, спасибо"]]
+                reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+                await query.message.reply_text(
+                    "Хотите получить рекомендации на основе этой книги?",
+                    reply_markup=reply_markup
+                )
+                return RECOMMEND_FROM_RATE
+
+        elif action == 'rate_rec': # Обработка кнопок оценки после рекомендаций
+             if len(data_parts) == 2:
+                 book_id = int(data_parts[1])
+                 user_id = query.from_user.id
+
+                 # Создаем inline клавиатуру для выбора оценки
+                 keyboard = []
+                 for i in range(1, 6):
+                     keyboard.append([
+                         InlineKeyboardButton(
+                             f"{i} {'⭐' * i}",
+                             callback_data=f"rate_book_{book_id}_{i}" # Новый формат: rate_book_<book_id>_<rating>
+                         )
+                     ])
+                 reply_markup = InlineKeyboardMarkup(keyboard)
+
+                 # Редактируем сообщение, чтобы предложить оценки
+                 # Можно добавить информацию о книге, которую оцениваем
+                 book_data = get_book_by_id(book_id)
+                 book_title = book_data.get('title_ru', 'книги') if book_data else 'книги'
+
+                 await query.message.edit_text(
+                     f"Оцените книгу \"{book_title}\" от 1 до 5 звезд:",
+                     reply_markup=reply_markup
+                 )
+                 # Остаемся в состоянии RATE (или переходим в новое, если нужно)
+                 return RATE # Остаемся в состоянии RATE для выбора оценки
+             else:
+                 await query.message.reply_text("Произошла ошибка при обработке запроса оценки рекомендации.")
+                 return ConversationHandler.END
+
+
+        elif action == 'rate_book': # Обработка выбора оценки после рекомендаций
+             if len(data_parts) == 3:
+                  book_id = int(data_parts[1])
+                  rating = int(data_parts[2])
+                  user_id = query.from_user.id
+
+                  if 1 <= rating <= 5:
+                       # Сохраняем оценку
+                       add_rating(book_id, user_id, rating)
+
+                       # Обновляем сообщение с оценкой
+                       book_data = get_book_by_id(book_id)
+                       book_title = book_data.get('title_ru', 'книги') if book_data else 'книги'
+
+                       await query.message.edit_text(
+                            f"Спасибо за оценку! Вы поставили книге \"{book_title}\" {rating} {'⭐' * rating}"
+                       )
+                       # Предлагаем получить рекомендации на основе этой книги
+                       keyboard = [["Да, получить рекомендации"], ["Нет, спасибо"]]
+                       reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+                       await query.message.reply_text(
+                           "Хотите получить рекомендации на основе этой книги?",
+                           reply_markup=reply_markup
+                       )
+                       return RECOMMEND_FROM_RATE
+                  else:
+                       await query.message.reply_text("Некорректное значение оценки.")
+                       return ConversationHandler.END
+             else:
+                 await query.message.reply_text("Произошла ошибка при обработке выбора оценки рекомендации.")
+                 return ConversationHandler.END
+
+
+        elif query.data == "search_again": # Обработка кнопки "Искать еще раз" после рекомендаций
+             # Логика уже есть в process_book_choice, нужно её использовать
+             # Это сложнее, так как process_book_choice ожидает текстовый ввод, а тут callback
+             # Временно завершаем диалог и просим использовать команду /search
+             await query.message.reply_text("Нажмите /search, чтобы искать снова.") # Или можно переиспользовать логику process_search
+             return ConversationHandler.END
+
+
     except (ValueError, IndexError):
         await query.message.reply_text(
-            "Произошла ошибка при обработке оценки. Пожалуйста, попробуйте снова."
+            "Произошла ошибка при обработке запроса. Пожалуйста, попробуйте снова."
         )
         return ConversationHandler.END
 
