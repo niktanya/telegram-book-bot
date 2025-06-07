@@ -1,5 +1,5 @@
 import unittest
-from services.database import (
+from src.services.database import (
     get_all_books,
     get_all_ratings,
     get_book_by_title,
@@ -9,7 +9,7 @@ from services.database import (
     add_rating
 )
 import sqlite3
-from services.database import DB_FILE
+from src.services.database import DB_FILE
 
 class TestDatabase(unittest.TestCase):
     def test_get_all_books(self):

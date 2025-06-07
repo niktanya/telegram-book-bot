@@ -364,6 +364,48 @@ def get_book_by_title(title: str) -> Optional[Dict[str, Any]]:
         logger.error(f"Ошибка при поиске книги по названию: {e}")
         raise
 
+def update_book(book_id: int, title_ru: str, genre: str, description: str) -> None:
+    """
+    Обновление данных книги в базе данных.
+    
+    Args:
+        book_id: ID книги
+        title_ru: Название на русском
+        genre: Жанр
+        description: Описание
+    """
+    try:
+        logger.info(f"Начинаем обновление книги {book_id}")
+        logger.info(f"Новые данные: title_ru='{title_ru}', genre='{genre}', description='{description}'")
+        
+        with sqlite3.connect(DB_FILE) as conn:
+            cursor = conn.cursor()
+            
+            # Проверяем текущие данные
+            cursor.execute("SELECT title_ru, genre, description FROM books WHERE book_id = ?", (book_id,))
+            current = cursor.fetchone()
+            if current:
+                logger.info(f"Текущие данные: title_ru='{current[0]}', genre='{current[1]}', description='{current[2]}'")
+            
+            cursor.execute("""
+                UPDATE books 
+                SET title_ru = ?, genre = ?, description = ?
+                WHERE book_id = ?
+            """, (title_ru, genre, description, book_id))
+            
+            # Проверяем, что данные обновились
+            cursor.execute("SELECT title_ru, genre, description FROM books WHERE book_id = ?", (book_id,))
+            updated = cursor.fetchone()
+            if updated:
+                logger.info(f"Обновленные данные: title_ru='{updated[0]}', genre='{updated[1]}', description='{updated[2]}'")
+            
+            conn.commit()
+            logger.info(f"Книга {book_id} успешно обновлена")
+            
+    except Exception as e:
+        logger.error(f"Ошибка при обновлении книги в базе данных: {e}")
+        raise
+
 # Инициализируем базу данных при импорте модуля
 init_db()
 # Загружаем данные из CSV, если их еще нет

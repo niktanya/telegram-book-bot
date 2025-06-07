@@ -299,6 +299,15 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         # Формируем сообщение с рекомендациями
         message = "📚 Вот книги, которые могут вам понравиться:\n\n"
         
+        # Определяем тип рекомендаций по наличию числового значения схожести
+        first_book = recommendations[0] if recommendations else {}
+        similarity = first_book.get('similarity', 0)
+        
+        if isinstance(similarity, float) and similarity > 0:
+            message = "📊 Рекомендации на основе оценок других читателей:\n\n"
+        else:
+            message = "🤖 К сожалению, пока недостаточно оценок других читателей для этой книги. Вот рекомендации от GPT:\n\n"
+        
         for i, book in enumerate(recommendations, 1):
             # Теперь book - это словарь, полученный от recommend_books
             title = book.get('title', 'Неизвестно') # Используем .get для безопасности
@@ -315,12 +324,6 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 f"📖 Описание: {description}\n"
                 f"🏷 Жанр: {genre}\n"
             )
-            # Проверка на тип схожести (может быть числом от коллаб. фильтрации или строкой от GPT)
-            if isinstance(similarity, float) and similarity > 0:
-                 message += f"📊 Схожесть: {similarity:.2f}\n"
-            elif isinstance(similarity, str) and similarity:
-                 message += f"📊 Чем похоже: {similarity}\n"
-
             message += "\n"
 
         # Добавляем кнопки для оценки книг
@@ -331,17 +334,11 @@ async def process_recommend(update: Update, context: ContextTypes.DEFAULT_TYPE) 
                 keyboard.append([
                     InlineKeyboardButton(f"Оценить книгу {i+1}", callback_data=f"rate_rec_{book['book_id']}")
                 ])
-        # Добавляем кнопку "Искать еще раз" только если есть рекомендации с book_id
-        if keyboard:
-            keyboard.append([InlineKeyboardButton("Искать еще раз", callback_data="search_again")])
-
-        # Если рекомендаций с book_id нет, можно не добавлять никаких кнопок или только "Искать еще раз"
-        # Если рекомендаций вообще нет (пустой список), этот блок не выполнится
-        # Если рекомендации есть, но без book_id (например, только от GPT и не нашлись в базе), то добавится только "Искать еще раз" (если keyboard изначально пустая, а потом в нее добавится эта кнопка)
-        # Упростим: добавляем кнопку "Искать еще раз" всегда, если есть хоть какие-то рекомендации
-        if not keyboard and recommendations: # Если keyboard пустая, но рекомендации есть
-             keyboard.append([InlineKeyboardButton("Искать еще раз", callback_data="search_again")])
-
+        # Добавляем кнопки "Искать еще раз" и "Спасибо за рекомендации"
+        keyboard.append([
+            InlineKeyboardButton("Искать еще раз", callback_data="search_again"),
+            InlineKeyboardButton("Спасибо за рекомендации", callback_data="thanks_recommendations")
+        ])
 
         reply_markup = InlineKeyboardMarkup(keyboard)
         
@@ -492,6 +489,11 @@ async def process_rating_callback(update: Update, context: ContextTypes.DEFAULT_
              await query.message.reply_text("Нажмите /search, чтобы искать снова.") # Или можно переиспользовать логику process_search
              return ConversationHandler.END
 
+        elif query.data == "thanks_recommendations": # Обработка кнопки "Спасибо за рекомендации"
+             await query.message.edit_text(
+                 "Спасибо за использование рекомендаций! Если захотите найти другую книгу, используйте команду /search"
+             )
+             return ConversationHandler.END
 
     except (ValueError, IndexError):
         await query.message.reply_text(
@@ -563,7 +565,13 @@ def run_bot(token: str) -> None:
             CHOOSE_BOOK: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_book_choice)],
             RECOMMEND_FROM_RATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommendation_choice)],
             RECOMMEND_DIRECT: [MessageHandler(filters.TEXT & ~filters.COMMAND, process_recommend)],
-            RATE: [CallbackQueryHandler(process_rating_callback, pattern=r"^rate_\d+$")]
+            RATE: [
+                CallbackQueryHandler(process_rating_callback, pattern=r"^rate_\d+$"),
+                CallbackQueryHandler(process_rating_callback, pattern=r"^rate_rec_\d+$"),
+                CallbackQueryHandler(process_rating_callback, pattern=r"^rate_book_\d+_\d+$"),
+                CallbackQueryHandler(process_rating_callback, pattern=r"^search_again$"),
+                CallbackQueryHandler(process_rating_callback, pattern=r"^thanks_recommendations$")
+            ]
         },
         fallbacks=[CommandHandler("cancel", cancel)],
     )

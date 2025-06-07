@@ -43,13 +43,14 @@ DATA_DIR = Path(__file__).parent.parent.parent / "data"
 RATINGS_FILE = DATA_DIR / "ratings.csv"
 BOOKS_FILE = DATA_DIR / "books.csv"
 
-async def recommend_books(book_query: str, num_recommendations: int = 3) -> List[Dict[str, Any]]:
+async def recommend_books(book_query: str, num_recommendations: int = 3, similarity_threshold: float = 0.3) -> List[Dict[str, Any]]:
     """
     Получение рекомендаций книг на основе запроса пользователя.
     
     Args:
         book_query: Запрос пользователя (название книги или описание)
         num_recommendations: Количество рекомендаций
+        similarity_threshold: Пороговое значение схожести для коллаборативной фильтрации
         
     Returns:
         Список словарей с рекомендациями
@@ -60,7 +61,7 @@ async def recommend_books(book_query: str, num_recommendations: int = 3) -> List
         ratings_df = get_all_ratings()
         
         if not books_df.empty and not ratings_df.empty:
-            return await recommend_books_collaborative(book_query, num_recommendations)
+            return await recommend_books_collaborative(book_query, num_recommendations, similarity_threshold)
         else:
             return await recommend_books_gpt(book_query, num_recommendations)
     except Exception as e:
@@ -86,16 +87,17 @@ def find_closest_book_title(query, titles, threshold=75):
     else:
         return None
 
-async def recommend_books_collaborative(book_query: str, num_recommendations: int = 3) -> str:
+async def recommend_books_collaborative(book_query: str, num_recommendations: int = 3, similarity_threshold: float = 0.3) -> List[Dict[str, Any]]:
     """
     Рекомендации книг на основе коллаборативной фильтрации.
     
     Args:
         book_query: Название книги
         num_recommendations: Количество рекомендаций
+        similarity_threshold: Пороговое значение схожести (от 0 до 1)
         
     Returns:
-        Строка с рекомендациями в формате JSON
+        Список словарей с рекомендациями
     """
     try:
         # Получаем данные из базы
@@ -103,35 +105,29 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
         ratings_df = get_all_ratings()
         
         # Ищем книгу в базе
-        book = get_book_by_title(book_query) # Попытка найти по введенному названию
+        book = get_book_by_title(book_query)
 
         if not book:
             logger.info(f"Книга '{book_query}' не найдена в базе по точному или частичному совпадению.")
             # Если не найдена, пытаемся найти наиболее похожее название во всей базе
-            all_books_titles = books_df['title_ru'].tolist() # Используем русские названия для поиска похожего
+            all_books_titles = books_df['title_ru'].tolist()
             closest_title = find_closest_book_title(book_query, all_books_titles)
 
             if closest_title:
                 logger.info(f"Найдено наиболее похожее название: '{closest_title}'.")
-                # Получаем данные книги по похожему названию
                 book = get_book_by_title(closest_title)
                 if book:
                      logger.info(f"Книга с похожим названием найдена в базе. ID: {book['book_id']}")
                 else:
                      logger.error(f"Ошибка: Не удалось получить данные книги по похожему названию '{closest_title}'")
-                     # Если даже по похожему названию не нашли, переходим к GPT
-                     return await recommend_books_gpt(book_query, num_recommendations) # fallback к GPT
+                     return await recommend_books_gpt(book_query, num_recommendations)
             else:
                  logger.info(f"Не найдено похожее название книги для запроса '{book_query}'.")
-                 # Если не найдено похожее название, переходим к GPT
-                 return await recommend_books_gpt(book_query, num_recommendations) # fallback к GPT
+                 return await recommend_books_gpt(book_query, num_recommendations)
 
-        # Если книга найдена (либо по точному, либо по похожему названию)
         if not book:
-             # Это ветка для случая, когда get_book_by_title вернул None, и find_closest_book_title тоже не нашел или get_book_by_title по closest_title вернул None
-             # Этот случай уже обработан выше, но оставим для уверенности
              logger.info("Книга не найдена в базе данных после всех попыток.")
-             return await recommend_books_gpt(book_query, num_recommendations) # fallback к GPT
+             return await recommend_books_gpt(book_query, num_recommendations)
 
         book_id = book['book_id']
         
@@ -142,13 +138,6 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
             values='rating'
         ).fillna(0)
         
-        # Дополнительное логирование: выводим размеры матрицы и количество оценок для book_id
-        logger.info(f"Размеры матрицы оценок (ratings_matrix): {ratings_matrix.shape}.")
-        book_ratings_count = ratings_df[ ratings_df['book_id'] == book_id ].count()
-        logger.info(f"Количество оценок для book_id {book_id} (Harry Potter and the Philosopher's Stone): {book_ratings_count}.")
-        # (опционально) выводим первые несколько строк ratings_df, чтобы убедиться, что данные загружаются корректно
-        logger.info("Первые 5 строк ratings_df (для проверки загрузки данных):\n" + str(ratings_df.head(5)))
-
         # Вычисляем косинусное сходство между книгами
         book_similarity = cosine_similarity(ratings_matrix.T)
         book_similarity_df = pd.DataFrame(
@@ -160,9 +149,17 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
         # Получаем похожие книги
         similar_books = book_similarity_df[book_id].sort_values(ascending=False)[1:num_recommendations+1]
         
-        # Формируем рекомендации
+        # Фильтруем книги по порогу схожести
+        filtered_books = similar_books[similar_books >= similarity_threshold]
+        
+        # Если нет книг, проходящих порог схожести, используем GPT
+        if filtered_books.empty:
+            logger.info(f"Нет книг со схожестью выше порога {similarity_threshold}. Переключаемся на GPT.")
+            return await recommend_books_gpt(book_query, num_recommendations)
+        
+        # Формируем рекомендации только из книг, прошедших порог
         recommendations = []
-        for similar_book_id, similarity in similar_books.items():
+        for similar_book_id, similarity in filtered_books.items():
             book_data = get_book_by_id(similar_book_id)
             if book_data:
                 recommendations.append({
@@ -175,13 +172,13 @@ async def recommend_books_collaborative(book_query: str, num_recommendations: in
                     "book_id": similar_book_id
                 })
         
-        return json.dumps(recommendations, ensure_ascii=False)
+        return recommendations
         
     except Exception as e:
         logger.error(f"Ошибка при коллаборативной фильтрации: {e}")
         return await recommend_books_gpt(book_query, num_recommendations)
 
-async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> str:
+async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> List[Dict[str, Any]]:
     """
     Рекомендации книг с использованием OpenAI GPT API.
     
@@ -190,7 +187,7 @@ async def recommend_books_gpt(book_query: str, num_recommendations: int = 3) -> 
         num_recommendations: Количество рекомендаций
         
     Returns:
-        Строка с результатом рекомендаций
+        Список словарей с рекомендациями
     """
     try:
         # Запрос к GPT API
